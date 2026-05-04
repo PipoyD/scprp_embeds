@@ -4,7 +4,7 @@
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>SCPRP YouTube Audio</title>
-	<meta name="referrer" content="strict-origin-when-cross-origin">
+	<meta name="referrer" content="no-referrer">
 	<style>
 		html, body {
 			margin: 0;
@@ -20,13 +20,11 @@
 			padding: 10px;
 			font-size: 11px;
 			color: #888;
+			white-space: pre-wrap;
 		}
-		#status.error {
-			color: #ff6666;
-		}
-		#status.ok {
-			color: #66ff66;
-		}
+		#status.error { color: #ff6666; }
+		#status.ok    { color: #66ff66; }
+		#status.try   { color: #ffcc66; }
 	</style>
 </head>
 <body>
@@ -35,27 +33,37 @@
 
 	<script>
 		// ============================================================
-		// === PIPED — extracteur d'URL audio public ===
+		// === INVIDIOUS — résolution audio sans fetch JS ===
 		//
-		// Piped est un frontend YouTube fédéré, open-source, qui expose
-		// une API REST simple : GET /streams/{videoId} retourne un JSON
-		// avec un champ `audioStreams[]` contenant les URLs googlevideo
-		// directes. Pas d'iframe = 0 pub.
+		// Pourquoi pas Piped + fetch() : le WebSurface de s&box (et/ou
+		// les CORS strictes des instances) bloquent les requêtes XHR
+		// cross-origin → "Failed to fetch" sur toutes les instances.
 		//
-		// Les instances meurent régulièrement (DDoS, blocs YouTube, abus
-		// d'usage). On essaie une liste dans l'ordre, fallback auto.
+		// Pourquoi Invidious + <audio src> direct : on charge l'URL
+		// `/latest_version?id=...&itag=140` qui fait un redirect 302
+		// vers une URL googlevideo signée. Le navigateur suit le
+		// redirect via le pipeline media (PAS via fetch), donc :
+		// - aucun preflight CORS
+		// - aucun XHR à autoriser
+		// - juste un GET media classique, comme charger une <img>
 		//
-		// Pour mettre à jour la liste : https://piped.video/preferences
-		// (section "Instances", ou page wiki du projet Piped).
-		// Garde 3-4 instances minimum pour résilience.
+		// itag 140 = AAC m4a audio 128kbps. Le seul format universel
+		// compatible HTML5 audio sur tous les Chromium.
+		//
+		// Cascade onerror : si la 1re instance répond pas (down,
+		// rate-limit, blacklist YouTube), on passe à la suivante.
+		// Mettre à jour la liste : https://api.invidious.io/
 		// ============================================================
-		const PIPED_INSTANCES = [
-			'https://pipedapi.kavin.rocks',
-			'https://pipedapi.adminforge.de',
-			'https://api.piped.projectsegfau.lt',
-			'https://pipedapi.leptons.xyz',
-			'https://pipedapi.r4fo.com'
+		const INVIDIOUS_INSTANCES = [
+			'https://yewtu.be',
+			'https://invidious.fdn.fr',
+			'https://invidious.privacydev.net',
+			'https://iv.melmac.space',
+			'https://invidious.protokolla.fi',
+			'https://inv.nadeko.net',
+			'https://invidious.private.coffee'
 		];
+		const ITAG_AUDIO_M4A = 140;
 		// ============================================================
 
 		const params = new URLSearchParams(window.location.search);
@@ -69,77 +77,66 @@
 			status.className = cls;
 		}
 
-		// Sélectionne le meilleur stream audio depuis le JSON Piped.
-		// Préfère le bitrate le plus haut, en évitant les formats DRM.
-		function pickBestAudioStream(audioStreams) {
-			if (!Array.isArray(audioStreams) || audioStreams.length === 0) return null;
-			// Filter out anything sans URL ou en DRM
-			const playable = audioStreams.filter(s => s.url && !s.drmFamilies);
-			if (playable.length === 0) return null;
-			// Tri par bitrate desc (default 0 si absent)
-			playable.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-			return playable[0];
-		}
-
-		// Tente une instance Piped. Retourne { ok, url, error }.
-		async function tryInstance(endpoint, vid) {
-			try {
-				const res = await fetch(`${endpoint}/streams/${encodeURIComponent(vid)}`, {
-					method: 'GET',
-					headers: { 'Accept': 'application/json' }
-				});
-				if (!res.ok) {
-					return { ok: false, error: `HTTP ${res.status}` };
-				}
-				const data = await res.json();
-				if (data.error) {
-					return { ok: false, error: data.error };
-				}
-				const stream = pickBestAudioStream(data.audioStreams);
-				if (!stream) {
-					return { ok: false, error: 'no playable audio stream' };
-				}
-				return { ok: true, url: stream.url };
-			} catch (err) {
-				return { ok: false, error: err.message };
-			}
-		}
-
-		async function resolveAudioUrl(vid) {
-			const errors = [];
-			for (const endpoint of PIPED_INSTANCES) {
-				const host = new URL(endpoint).hostname;
-				setStatus(`Tentative via ${host}...`);
-				const result = await tryInstance(endpoint, vid);
-				if (result.ok) return result.url;
-				errors.push(`${host}: ${result.error}`);
-			}
-			throw new Error(`Toutes les instances Piped ont échoué :\n${errors.join('\n')}`);
-		}
-
 		if (!videoId) {
 			setStatus('Aucun videoId fourni. Usage : ?v=VIDEO_ID', 'error');
 		} else {
-			// Volume initial (clamp 0..1 pour HTML5 audio)
 			player.volume = Math.max(0, Math.min(100, volumePercent)) / 100;
 
-			setStatus('Extraction audio via Piped...');
-			resolveAudioUrl(videoId)
-				.then(audioUrl => {
-					setStatus('Lecture en cours (audio direct, sans pub).', 'ok');
-					player.src = audioUrl;
-					player.play().catch(err => {
-						setStatus(`Autoplay bloqué : ${err.message}. Tap simulé en attente.`, 'error');
-					});
-				})
-				.catch(err => {
-					setStatus(`Erreur d'extraction : ${err.message}`, 'error');
-					console.error('[SCPRP YT] Extract failed:', err);
-				});
-		}
+			let attemptIndex = 0;
+			const errors = [];
 
-		player.addEventListener('ended', () => setStatus('Lecture terminée.'));
-		player.addEventListener('error', e => setStatus(`Audio error: ${player.error?.message ?? 'unknown'}`, 'error'));
+			function tryNext() {
+				if (attemptIndex >= INVIDIOUS_INSTANCES.length) {
+					setStatus(
+						'Toutes les instances Invidious ont échoué :\n' +
+						errors.join('\n'),
+						'error'
+					);
+					return;
+				}
+
+				const endpoint = INVIDIOUS_INSTANCES[attemptIndex];
+				const host = new URL(endpoint).hostname;
+				const audioUrl = `${endpoint}/latest_version?id=${encodeURIComponent(videoId)}&itag=${ITAG_AUDIO_M4A}`;
+
+				setStatus(`Tentative ${attemptIndex + 1}/${INVIDIOUS_INSTANCES.length} : ${host}...`, 'try');
+
+				// On remplace src + on rejoue. Si l'URL ne charge pas
+				// (404 / 500 / timeout / redirect cassé), un event
+				// "error" remontera sur le <audio>.
+				player.src = audioUrl;
+				player.play().catch(err => {
+					// Autoplay bloqué : pas une erreur de stream, c'est
+					// le browser qui demande un user gesture. Le HUD
+					// parent (MusicWebPlayerHud) simule un clic au bout
+					// de 2.5s (cf. _autoplayUnblocked).
+					console.warn('[SCPRP YT] play() rejected:', err.message);
+				});
+
+				attemptIndex++;
+			}
+
+			// Quand le stream commence à jouer effectivement
+			player.addEventListener('playing', () => {
+				const host = new URL(player.src).hostname;
+				setStatus(`Lecture en cours via ${host} (sans pub).`, 'ok');
+			});
+
+			// Erreur de chargement → on bascule sur l'instance suivante
+			player.addEventListener('error', () => {
+				const lastEndpoint = INVIDIOUS_INSTANCES[attemptIndex - 1];
+				const lastHost = lastEndpoint ? new URL(lastEndpoint).hostname : 'unknown';
+				const code = player.error?.code ?? '?';
+				const msg = player.error?.message || 'load failed';
+				errors.push(`${lastHost}: code=${code} ${msg}`);
+				// Petit délai pour éviter de spammer si toutes répondent vite
+				setTimeout(tryNext, 250);
+			});
+
+			player.addEventListener('ended', () => setStatus('Lecture terminée.'));
+
+			tryNext();
+		}
 	</script>
 </body>
 </html>
