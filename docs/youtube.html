@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>SCPRP YouTube Embed</title>
+	<title>SCPRP YouTube Audio</title>
 	<meta name="referrer" content="strict-origin-when-cross-origin">
 	<style>
 		html, body {
@@ -12,85 +12,147 @@
 			width: 100%;
 			height: 100%;
 			background: #000;
+			color: #fff;
+			font-family: monospace;
 			overflow: hidden;
 		}
-		#player {
-			width: 100%;
-			height: 100%;
-			border: 0;
+		#status {
+			padding: 10px;
+			font-size: 11px;
+			color: #888;
+		}
+		#status.error {
+			color: #ff6666;
+		}
+		#status.ok {
+			color: #66ff66;
 		}
 	</style>
 </head>
 <body>
-	<div id="player"></div>
+	<audio id="player" autoplay></audio>
+	<div id="status">Initialisation...</div>
 
 	<script>
-		// === Page proxy YouTube pour SCPRP ===
-		// Cette page est chargée par le WebPanel s&box pour contourner l'erreur 153
-		// (YouTube refuse l'embed sans Referer fiable). En la hostant sur GitHub Pages
-		// (HTTPS, domaine stable), YouTube reçoit un Referer valide et accepte l'embed.
+		// ============================================================
+		// === COBALT.TOOLS — extracteur d'URL audio public ===
+		// API publique open-source qui retourne une URL audio directe
+		// pour une URL YouTube. Pas d'iframe = 0 pub.
 		//
-		// Query params supportés :
-		//   ?v=VIDEO_ID      → ID YouTube à charger (obligatoire)
-		//   &t=30            → seek à la seconde 30 au load (optionnel)
-		//   &vol=50          → volume initial 0..100 (optionnel, default 100)
-		//   &action=pause    → pause au load (optionnel — utile pour reload-pause)
-		//   &nonce=12345     → cache buster pour forcer le reload sur même URL
+		// Endpoints à essayer dans l'ordre (fallback si l'un est down) :
+		// - api.cobalt.tools (instance principale)
+		// - co.wuk.sh (mirror communautaire historique)
 		//
-		// Le code C# côté SCPRP change l'URL du WebPanel avec ces params pour
-		// piloter la lecture. Recharger la page = restart de la vidéo, c'est une
-		// limitation acceptée (seek/pause précis nécessiteraient postMessage côté
-		// client, plus complexe).
+		// Si TOUS les endpoints sont down, ajoute-en un nouveau dans la
+		// liste depuis https://instances.cobalt.tools/ (page publique
+		// listant les instances communautaires actives).
+		// ============================================================
+		const COBALT_INSTANCES = [
+			'https://api.cobalt.tools/',
+			'https://co.wuk.sh/api/json'
+		];
+		// ============================================================
 
 		const params = new URLSearchParams(window.location.search);
 		const videoId = params.get('v');
-		const startTime = parseInt(params.get('t') || '0', 10);
-		const volume = parseInt(params.get('vol') || '100', 10);
-		const action = params.get('action') || 'play';
+		const volumePercent = parseInt(params.get('vol') || '100', 10);
+		const status = document.getElementById('status');
+		const player = document.getElementById('player');
+
+		function setStatus(msg, cls = '') {
+			status.textContent = msg;
+			status.className = cls;
+		}
+
+		// Tente une instance cobalt. Retourne { ok, url, error }.
+		async function tryInstance(endpoint, youtubeUrl) {
+			try {
+				const res = await fetch(endpoint, {
+					method: 'POST',
+					headers: {
+						'Accept': 'application/json',
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({
+						url: youtubeUrl,
+						// v10 API (api.cobalt.tools) :
+						downloadMode: 'audio',
+						audioFormat: 'mp3',
+						// Legacy API (co.wuk.sh) — coexistent dans le même body :
+						isAudioOnly: true,
+						aFormat: 'mp3'
+					})
+				});
+
+				if (!res.ok) {
+					return { ok: false, error: `HTTP ${res.status}` };
+				}
+
+				const data = await res.json();
+
+				// v10 : status = "tunnel" | "redirect" | "picker" | "error"
+				// legacy : status = "stream" | "redirect" | "picker" | "error" | "rate-limit"
+				if (data.status === 'error' || data.status === 'rate-limit') {
+					return {
+						ok: false,
+						error: data.text || data.error?.code || data.status
+					};
+				}
+
+				// "url" présent pour tunnel / redirect / stream
+				if (data.url) {
+					return { ok: true, url: data.url };
+				}
+
+				// "picker" = plusieurs choix (rare pour audio mono-track)
+				if (data.picker && data.picker.length > 0) {
+					return { ok: true, url: data.picker[0].url };
+				}
+
+				return { ok: false, error: 'no url in response' };
+			} catch (err) {
+				return { ok: false, error: err.message };
+			}
+		}
+
+		async function resolveAudioUrl(youtubeUrl) {
+			const errors = [];
+			for (const endpoint of COBALT_INSTANCES) {
+				setStatus(`Tentative via ${new URL(endpoint).hostname}...`);
+				const result = await tryInstance(endpoint, youtubeUrl);
+				if (result.ok) return result.url;
+				errors.push(`${new URL(endpoint).hostname}: ${result.error}`);
+			}
+			throw new Error(`Toutes les instances cobalt ont échoué :\n${errors.join('\n')}`);
+		}
 
 		if (!videoId) {
-			document.getElementById('player').innerHTML =
-				'<div style="color:white;padding:20px;font-family:sans-serif;">Aucun videoId fourni. Usage : ?v=VIDEO_ID</div>';
+			setStatus('Aucun videoId fourni. Usage : ?v=VIDEO_ID', 'error');
 		} else {
-			// Charge l'IFrame Player API de YouTube
-			const tag = document.createElement('script');
-			tag.src = "https://www.youtube.com/iframe_api";
-			document.head.appendChild(tag);
+			// Volume initial (clamp 0..1 pour HTML5 audio)
+			player.volume = Math.max(0, Math.min(100, volumePercent)) / 100;
 
-			let player;
-			window.onYouTubeIframeAPIReady = function () {
-				player = new YT.Player('player', {
-					height: '100%',
-					width: '100%',
-					videoId: videoId,
-					playerVars: {
-						autoplay: 1,
-						controls: 0,
-						rel: 0,
-						modestbranding: 1,
-						playsinline: 1,
-						start: startTime,
-						origin: window.location.origin,
-						enablejsapi: 1
-					},
-					events: {
-						onReady: function (event) {
-							event.target.setVolume(Math.max(0, Math.min(100, volume)));
-							if (action === 'pause') {
-								event.target.pauseVideo();
-							} else {
-								event.target.playVideo();
-							}
-						},
-						onError: function (event) {
-							// Codes : 2 = invalid videoId, 5 = HTML5 player error,
-							// 100 = video not found, 101/150 = embed disabled by uploader.
-							console.error('[SCPRP YT] Error code:', event.data);
-						}
-					}
+			const youtubeUrl = `https://youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+			setStatus('Extraction audio via cobalt.tools...');
+
+			resolveAudioUrl(youtubeUrl)
+				.then(audioUrl => {
+					setStatus('Lecture en cours (audio direct, sans pub).', 'ok');
+					player.src = audioUrl;
+					player.play().catch(err => {
+						// Autoplay bloqué → le tap-to-unblock du HUD doit déclencher.
+						setStatus(`Autoplay bloqué : ${err.message}. Tap simulé en attente.`, 'error');
+					});
+				})
+				.catch(err => {
+					setStatus(`Erreur d'extraction : ${err.message}`, 'error');
+					console.error('[SCPRP YT] Extract failed:', err);
 				});
-			};
 		}
+
+		// Catch les events audio pour debug
+		player.addEventListener('ended', () => setStatus('Lecture terminée.'));
+		player.addEventListener('error', e => setStatus(`Audio error: ${player.error?.message ?? 'unknown'}`, 'error'));
 	</script>
 </body>
 </html>
