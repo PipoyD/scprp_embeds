@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>SCPRP YouTube Embed</title>
+	<meta name="referrer" content="strict-origin-when-cross-origin">
+	<style>
+		html, body {
+			margin: 0;
+			padding: 0;
+			width: 100%;
+			height: 100%;
+			background: #000;
+			overflow: hidden;
+		}
+		#player {
+			width: 100%;
+			height: 100%;
+			border: 0;
+		}
+	</style>
+</head>
+<body>
+	<div id="player"></div>
+
+	<script>
+		// === Page proxy YouTube pour SCPRP ===
+		// Cette page est chargée par le WebPanel s&box pour contourner l'erreur 153
+		// (YouTube refuse l'embed sans Referer fiable). En la hostant sur GitHub Pages
+		// (HTTPS, domaine stable), YouTube reçoit un Referer valide et accepte l'embed.
+		//
+		// Query params supportés :
+		//   ?v=VIDEO_ID      → ID YouTube à charger (obligatoire)
+		//   &t=30            → seek à la seconde 30 au load (optionnel)
+		//   &vol=50          → volume initial 0..100 (optionnel, default 100)
+		//   &action=pause    → pause au load (optionnel — utile pour reload-pause)
+		//   &nonce=12345     → cache buster pour forcer le reload sur même URL
+		//
+		// Le code C# côté SCPRP change l'URL du WebPanel avec ces params pour
+		// piloter la lecture. Recharger la page = restart de la vidéo, c'est une
+		// limitation acceptée (seek/pause précis nécessiteraient postMessage côté
+		// client, plus complexe).
+
+		const params = new URLSearchParams(window.location.search);
+		const videoId = params.get('v');
+		const startTime = parseInt(params.get('t') || '0', 10);
+		const volume = parseInt(params.get('vol') || '100', 10);
+		const action = params.get('action') || 'play';
+
+		if (!videoId) {
+			document.getElementById('player').innerHTML =
+				'<div style="color:white;padding:20px;font-family:sans-serif;">Aucun videoId fourni. Usage : ?v=VIDEO_ID</div>';
+		} else {
+			// Charge l'IFrame Player API de YouTube
+			const tag = document.createElement('script');
+			tag.src = "https://www.youtube.com/iframe_api";
+			document.head.appendChild(tag);
+
+			let player;
+			window.onYouTubeIframeAPIReady = function () {
+				player = new YT.Player('player', {
+					height: '100%',
+					width: '100%',
+					videoId: videoId,
+					playerVars: {
+						autoplay: 1,
+						controls: 0,
+						rel: 0,
+						modestbranding: 1,
+						playsinline: 1,
+						start: startTime,
+						origin: window.location.origin,
+						enablejsapi: 1
+					},
+					events: {
+						onReady: function (event) {
+							event.target.setVolume(Math.max(0, Math.min(100, volume)));
+							if (action === 'pause') {
+								event.target.pauseVideo();
+							} else {
+								event.target.playVideo();
+							}
+						},
+						onError: function (event) {
+							// Codes : 2 = invalid videoId, 5 = HTML5 player error,
+							// 100 = video not found, 101/150 = embed disabled by uploader.
+							console.error('[SCPRP YT] Error code:', event.data);
+						}
+					}
+				});
+			};
+		}
+	</script>
+</body>
+</html>
