@@ -2,140 +2,61 @@
 <html lang="fr">
 <head>
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>SCPRP YouTube Audio</title>
 	<meta name="referrer" content="no-referrer">
+	<title>SCPRP Audio Proxy</title>
 	<style>
-		html, body {
-			margin: 0;
-			padding: 0;
-			width: 100%;
-			height: 100%;
-			background: #000;
-			color: #fff;
-			font-family: monospace;
-			overflow: hidden;
-		}
-		#status {
-			padding: 10px;
-			font-size: 11px;
-			color: #888;
-			white-space: pre-wrap;
-		}
-		#status.error { color: #ff6666; }
-		#status.ok    { color: #66ff66; }
-		#status.try   { color: #ffcc66; }
+		html,body { margin:0; padding:0; width:100%; height:100%; background:#000; color:#9ad; font:11px monospace; overflow:hidden; }
+		#s { padding:8px; white-space:pre-wrap; }
+		.ok { color:#6f6; }
+		.err { color:#f66; }
 	</style>
 </head>
 <body>
-	<audio id="player" autoplay></audio>
-	<div id="status">Initialisation...</div>
-
+	<audio id="p" autoplay></audio>
+	<div id="s">init...</div>
 	<script>
-		// ============================================================
-		// === INVIDIOUS — résolution audio sans fetch JS ===
+		// === SCPRP audio proxy minimal ===
+		// Conçu pour les URLs Discord CDN (ou n'importe quelle URL audio directe :
+		// .mp3 / .m4a / .ogg / .wav). Charge l'URL passée en ?url=... dans une
+		// balise <audio> HTML5 et joue. Zéro fetch, zéro cascade, zéro CORS.
 		//
-		// Pourquoi pas Piped + fetch() : le WebSurface de s&box (et/ou
-		// les CORS strictes des instances) bloquent les requêtes XHR
-		// cross-origin → "Failed to fetch" sur toutes les instances.
+		// Pipeline d'usage :
+		//   1. Bot Discord (cf. /bot/yt_to_discord.py) DL un mp3 et l'upload.
+		//   2. User copie l'URL CDN du fichier (clic droit → Copier le lien).
+		//   3. User colle dans !menu → Musique côté SCPRP.
+		//   4. MusicUrlResolver classifie comme DirectAudio.
+		//   5. MusicVideoPlayerHost (VideoPlayer natif s&box) le joue direct
+		//      — ce HTML n'est PAS appelé pour Discord (kept comme fallback).
 		//
-		// Pourquoi Invidious + <audio src> direct : on charge l'URL
-		// `/latest_version?id=...&itag=140` qui fait un redirect 302
-		// vers une URL googlevideo signée. Le navigateur suit le
-		// redirect via le pipeline media (PAS via fetch), donc :
-		// - aucun preflight CORS
-		// - aucun XHR à autoriser
-		// - juste un GET media classique, comme charger une <img>
+		// Quand ce HTML EST appelé : si on configure
+		// scprp_music_youtube_proxy avec cette URL ET qu'on revient à un mode
+		// embed YouTube/SoundCloud futur, ce fichier sert de host.
+		// Pour l'instant, en pratique, il sert juste de fallback générique.
 		//
-		// itag 140 = AAC m4a audio 128kbps. Le seul format universel
-		// compatible HTML5 audio sur tous les Chromium.
-		//
-		// Cascade onerror : si la 1re instance répond pas (down,
-		// rate-limit, blacklist YouTube), on passe à la suivante.
-		// Mettre à jour la liste : https://api.invidious.io/
-		// ============================================================
-		const INVIDIOUS_INSTANCES = [
-			'https://yewtu.be',
-			'https://invidious.fdn.fr',
-			'https://invidious.privacydev.net',
-			'https://iv.melmac.space',
-			'https://invidious.protokolla.fi',
-			'https://inv.nadeko.net',
-			'https://invidious.private.coffee'
-		];
-		const ITAG_AUDIO_M4A = 140;
-		// ============================================================
+		// Query params :
+		//   ?url=ENCODED_URL  → URL directe à jouer (priorité)
+		//   ?v=YOUTUBE_ID     → legacy, affiche un warning d'incompatibilité
+		//   ?vol=NN           → volume initial 0..100 (default 100)
+		const q = new URLSearchParams(location.search);
+		const url = q.get("url");
+		const vid = q.get("v");
+		const vol = Math.max(0, Math.min(100, parseInt(q.get("vol") || "100", 10))) / 100;
+		const p = document.getElementById("p");
+		const s = document.getElementById("s");
+		const set = (m, c) => { s.textContent = m; s.className = c || ""; };
 
-		const params = new URLSearchParams(window.location.search);
-		const videoId = params.get('v');
-		const volumePercent = parseInt(params.get('vol') || '100', 10);
-		const status = document.getElementById('status');
-		const player = document.getElementById('player');
+		p.volume = vol;
 
-		function setStatus(msg, cls = '') {
-			status.textContent = msg;
-			status.className = cls;
-		}
-
-		if (!videoId) {
-			setStatus('Aucun videoId fourni. Usage : ?v=VIDEO_ID', 'error');
+		if (url) {
+			set("loading...");
+			p.src = url;
+			p.addEventListener("playing", () => set("playing (vol " + Math.round(vol*100) + "%)", "ok"), { once: true });
+			p.addEventListener("error", () => set("error: " + (p.error?.message || "load failed") + " — URL expirée ou bloquée ?", "err"));
+			p.addEventListener("ended", () => set("ended"));
+		} else if (vid) {
+			set("YouTube embed désactivé (?v=...). Utilise ?url=DIRECT_AUDIO_URL via le bot Discord.", "err");
 		} else {
-			player.volume = Math.max(0, Math.min(100, volumePercent)) / 100;
-
-			let attemptIndex = 0;
-			const errors = [];
-
-			function tryNext() {
-				if (attemptIndex >= INVIDIOUS_INSTANCES.length) {
-					setStatus(
-						'Toutes les instances Invidious ont échoué :\n' +
-						errors.join('\n'),
-						'error'
-					);
-					return;
-				}
-
-				const endpoint = INVIDIOUS_INSTANCES[attemptIndex];
-				const host = new URL(endpoint).hostname;
-				const audioUrl = `${endpoint}/latest_version?id=${encodeURIComponent(videoId)}&itag=${ITAG_AUDIO_M4A}`;
-
-				setStatus(`Tentative ${attemptIndex + 1}/${INVIDIOUS_INSTANCES.length} : ${host}...`, 'try');
-
-				// On remplace src + on rejoue. Si l'URL ne charge pas
-				// (404 / 500 / timeout / redirect cassé), un event
-				// "error" remontera sur le <audio>.
-				player.src = audioUrl;
-				player.play().catch(err => {
-					// Autoplay bloqué : pas une erreur de stream, c'est
-					// le browser qui demande un user gesture. Le HUD
-					// parent (MusicWebPlayerHud) simule un clic au bout
-					// de 2.5s (cf. _autoplayUnblocked).
-					console.warn('[SCPRP YT] play() rejected:', err.message);
-				});
-
-				attemptIndex++;
-			}
-
-			// Quand le stream commence à jouer effectivement
-			player.addEventListener('playing', () => {
-				const host = new URL(player.src).hostname;
-				setStatus(`Lecture en cours via ${host} (sans pub).`, 'ok');
-			});
-
-			// Erreur de chargement → on bascule sur l'instance suivante
-			player.addEventListener('error', () => {
-				const lastEndpoint = INVIDIOUS_INSTANCES[attemptIndex - 1];
-				const lastHost = lastEndpoint ? new URL(lastEndpoint).hostname : 'unknown';
-				const code = player.error?.code ?? '?';
-				const msg = player.error?.message || 'load failed';
-				errors.push(`${lastHost}: code=${code} ${msg}`);
-				// Petit délai pour éviter de spammer si toutes répondent vite
-				setTimeout(tryNext, 250);
-			});
-
-			player.addEventListener('ended', () => setStatus('Lecture terminée.'));
-
-			tryNext();
+			set("aucune URL fournie. Usage : ?url=ENCODED_AUDIO_URL", "err");
 		}
 	</script>
 </body>
