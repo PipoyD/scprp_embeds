@@ -35,21 +35,26 @@
 
 	<script>
 		// ============================================================
-		// === COBALT.TOOLS — extracteur d'URL audio public ===
-		// API publique open-source qui retourne une URL audio directe
-		// pour une URL YouTube. Pas d'iframe = 0 pub.
+		// === PIPED — extracteur d'URL audio public ===
 		//
-		// Endpoints à essayer dans l'ordre (fallback si l'un est down) :
-		// - api.cobalt.tools (instance principale)
-		// - co.wuk.sh (mirror communautaire historique)
+		// Piped est un frontend YouTube fédéré, open-source, qui expose
+		// une API REST simple : GET /streams/{videoId} retourne un JSON
+		// avec un champ `audioStreams[]` contenant les URLs googlevideo
+		// directes. Pas d'iframe = 0 pub.
 		//
-		// Si TOUS les endpoints sont down, ajoute-en un nouveau dans la
-		// liste depuis https://instances.cobalt.tools/ (page publique
-		// listant les instances communautaires actives).
+		// Les instances meurent régulièrement (DDoS, blocs YouTube, abus
+		// d'usage). On essaie une liste dans l'ordre, fallback auto.
+		//
+		// Pour mettre à jour la liste : https://piped.video/preferences
+		// (section "Instances", ou page wiki du projet Piped).
+		// Garde 3-4 instances minimum pour résilience.
 		// ============================================================
-		const COBALT_INSTANCES = [
-			'https://api.cobalt.tools/',
-			'https://co.wuk.sh/api/json'
+		const PIPED_INSTANCES = [
+			'https://pipedapi.kavin.rocks',
+			'https://pipedapi.adminforge.de',
+			'https://api.piped.projectsegfau.lt',
+			'https://pipedapi.leptons.xyz',
+			'https://pipedapi.r4fo.com'
 		];
 		// ============================================================
 
@@ -64,66 +69,52 @@
 			status.className = cls;
 		}
 
-		// Tente une instance cobalt. Retourne { ok, url, error }.
-		async function tryInstance(endpoint, youtubeUrl) {
-			try {
-				const res = await fetch(endpoint, {
-					method: 'POST',
-					headers: {
-						'Accept': 'application/json',
-						'Content-Type': 'application/json'
-					},
-					body: JSON.stringify({
-						url: youtubeUrl,
-						// v10 API (api.cobalt.tools) :
-						downloadMode: 'audio',
-						audioFormat: 'mp3',
-						// Legacy API (co.wuk.sh) — coexistent dans le même body :
-						isAudioOnly: true,
-						aFormat: 'mp3'
-					})
-				});
+		// Sélectionne le meilleur stream audio depuis le JSON Piped.
+		// Préfère le bitrate le plus haut, en évitant les formats DRM.
+		function pickBestAudioStream(audioStreams) {
+			if (!Array.isArray(audioStreams) || audioStreams.length === 0) return null;
+			// Filter out anything sans URL ou en DRM
+			const playable = audioStreams.filter(s => s.url && !s.drmFamilies);
+			if (playable.length === 0) return null;
+			// Tri par bitrate desc (default 0 si absent)
+			playable.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+			return playable[0];
+		}
 
+		// Tente une instance Piped. Retourne { ok, url, error }.
+		async function tryInstance(endpoint, vid) {
+			try {
+				const res = await fetch(`${endpoint}/streams/${encodeURIComponent(vid)}`, {
+					method: 'GET',
+					headers: { 'Accept': 'application/json' }
+				});
 				if (!res.ok) {
 					return { ok: false, error: `HTTP ${res.status}` };
 				}
-
 				const data = await res.json();
-
-				// v10 : status = "tunnel" | "redirect" | "picker" | "error"
-				// legacy : status = "stream" | "redirect" | "picker" | "error" | "rate-limit"
-				if (data.status === 'error' || data.status === 'rate-limit') {
-					return {
-						ok: false,
-						error: data.text || data.error?.code || data.status
-					};
+				if (data.error) {
+					return { ok: false, error: data.error };
 				}
-
-				// "url" présent pour tunnel / redirect / stream
-				if (data.url) {
-					return { ok: true, url: data.url };
+				const stream = pickBestAudioStream(data.audioStreams);
+				if (!stream) {
+					return { ok: false, error: 'no playable audio stream' };
 				}
-
-				// "picker" = plusieurs choix (rare pour audio mono-track)
-				if (data.picker && data.picker.length > 0) {
-					return { ok: true, url: data.picker[0].url };
-				}
-
-				return { ok: false, error: 'no url in response' };
+				return { ok: true, url: stream.url };
 			} catch (err) {
 				return { ok: false, error: err.message };
 			}
 		}
 
-		async function resolveAudioUrl(youtubeUrl) {
+		async function resolveAudioUrl(vid) {
 			const errors = [];
-			for (const endpoint of COBALT_INSTANCES) {
-				setStatus(`Tentative via ${new URL(endpoint).hostname}...`);
-				const result = await tryInstance(endpoint, youtubeUrl);
+			for (const endpoint of PIPED_INSTANCES) {
+				const host = new URL(endpoint).hostname;
+				setStatus(`Tentative via ${host}...`);
+				const result = await tryInstance(endpoint, vid);
 				if (result.ok) return result.url;
-				errors.push(`${new URL(endpoint).hostname}: ${result.error}`);
+				errors.push(`${host}: ${result.error}`);
 			}
-			throw new Error(`Toutes les instances cobalt ont échoué :\n${errors.join('\n')}`);
+			throw new Error(`Toutes les instances Piped ont échoué :\n${errors.join('\n')}`);
 		}
 
 		if (!videoId) {
@@ -132,15 +123,12 @@
 			// Volume initial (clamp 0..1 pour HTML5 audio)
 			player.volume = Math.max(0, Math.min(100, volumePercent)) / 100;
 
-			const youtubeUrl = `https://youtube.com/watch?v=${encodeURIComponent(videoId)}`;
-			setStatus('Extraction audio via cobalt.tools...');
-
-			resolveAudioUrl(youtubeUrl)
+			setStatus('Extraction audio via Piped...');
+			resolveAudioUrl(videoId)
 				.then(audioUrl => {
 					setStatus('Lecture en cours (audio direct, sans pub).', 'ok');
 					player.src = audioUrl;
 					player.play().catch(err => {
-						// Autoplay bloqué → le tap-to-unblock du HUD doit déclencher.
 						setStatus(`Autoplay bloqué : ${err.message}. Tap simulé en attente.`, 'error');
 					});
 				})
@@ -150,7 +138,6 @@
 				});
 		}
 
-		// Catch les events audio pour debug
 		player.addEventListener('ended', () => setStatus('Lecture terminée.'));
 		player.addEventListener('error', e => setStatus(`Audio error: ${player.error?.message ?? 'unknown'}`, 'error'));
 	</script>
